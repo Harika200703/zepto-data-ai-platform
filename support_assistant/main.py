@@ -3,7 +3,7 @@ from typing import List, TypedDict
 
 import chromadb
 from fastapi import FastAPI
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sentence_transformers import SentenceTransformer
 from langgraph.graph import StateGraph, END
 
@@ -14,6 +14,8 @@ DB_DIR = os.path.join(BASE_DIR, "chroma_db")
 MODEL_NAME = "all-MiniLM-L6-v2"
 COLLECTION_NAME = "zepto_support"
 
+MOCK_LLM = os.getenv("MOCK_LLM", "1") == "1"
+
 app = FastAPI(title="Zepto Support Assistant")
 
 embedding_model = SentenceTransformer(MODEL_NAME)
@@ -21,21 +23,19 @@ embedding_model = SentenceTransformer(MODEL_NAME)
 chroma_client = chromadb.PersistentClient(path=DB_DIR)
 collection = chroma_client.get_collection(COLLECTION_NAME)
 
-MOCK_LLM = os.getenv("MOCK_LLM", "1") == "1"
-
 
 class AskRequest(BaseModel):
-    question: str
+    query: str = Field(..., min_length=1)
 
 
 class AskResponse(BaseModel):
     answer: str
     sources: List[str]
-    confidence: float
+    confidence: float = Field(..., ge=0.0, le=1.0)
 
 
 class AssistantState(TypedDict, total=False):
-    question: str
+    query: str
     intent: str
     answer: str
     sources: List[str]
@@ -43,27 +43,29 @@ class AssistantState(TypedDict, total=False):
 
 
 def classify_intent(state: AssistantState):
-    question = state["question"].lower()
+    query = state["query"].lower()
 
-    keywords = {
-        "delivery": ["delivery", "deliver", "minutes", "pin code"],
-        "return_refund": ["return", "refund", "damaged", "spoiled", "missing"],
-        "membership": ["pass", "membership", "basic", "subscription"],
-        "tracking": ["track", "rider", "tracking", "late", "delay"],
-        "cancellation": ["cancel", "cancellation"],
-        "gift_card": ["gift card", "giftcard"],
-        "support": ["support", "chat", "email", "phone"],
-    }
+    policy_keywords = [
+        "delivery",
+        "return",
+        "refund",
+        "membership",
+        "tracking",
+        "cancel",
+        "gift card",
+        "support hours",
+    ]
 
-    for intent, words in keywords.items():
-        if any(word in question for word in words):
-            return {"intent": intent}
+    if any(keyword in query for keyword in policy_keywords):
+        intent = "policy_question"
+    else:
+        intent = "general_question"
 
-    return {"intent": "general"}
+    return {"intent": intent}
 
 
-def retrieve_documents(question: str):
-    query_embedding = embedding_model.encode([question]).tolist()
+def retrieve_documents(query: str):
+    query_embedding = embedding_model.encode([query]).tolist()
 
     results = collection.query(
         query_embeddings=query_embedding,
@@ -72,17 +74,16 @@ def retrieve_documents(question: str):
 
     documents = results.get("documents", [[]])[0]
     metadatas = results.get("metadatas", [[]])[0]
-    distances = results.get("distances", [[]])[0]
 
     sources = [
         metadata.get("source", "unknown")
         for metadata in metadatas
     ]
 
-    return documents, sources, distances
+    return documents, sources
 
 
-def build_prompt(question: str, documents: List[str]) -> str:
+def build_prompt(query: str, documents: List[str]) -> str:
     context = "\n\n".join(documents)
 
     return f"""
@@ -90,84 +91,85 @@ Role:
 You are a helpful Zepto customer-support assistant.
 
 Context:
-Use only the supplied knowledge-base context.
+Use only the supplied Zepto policy context.
 
 Task:
-Answer the customer's question accurately and clearly.
+Answer the customer's query accurately using the retrieved context.
 
-Constraints:
-- Do not invent policies or information.
-- If the context does not contain the answer, say that the information is unavailable.
-- Do not mention internal implementation details.
-
-Question:
-{question}
-
-Knowledge-base context:
-{context}
+Negative constraints:
+- Do not answer using information not present in the provided context.
+- Do not invent policies, prices, timings, or services.
+- If the context does not contain the answer, clearly say that the information is unavailable.
 
 Format:
-Give a direct, easy-to-understand answer.
+Give a direct and easy-to-understand answer.
 
 Length:
 Keep the answer concise, preferably 2 to 5 sentences.
 
-Example:
-Question: Can I cancel an order after it is packed?
-Answer: Orders can be cancelled free of cost before they are packed. Once an order is packed, it cannot normally be cancelled through the app.
+Few-shot example:
+Query: Can I cancel my order after it is packed?
+Answer: Orders can be cancelled before they are packed. Once an order is packed, it cannot normally be cancelled through the app.
+
+Customer query:
+{query}
+
+Retrieved context:
+{context}
 """
 
 
-def mock_answer(question: str, documents: List[str]) -> str:
+def mock_policy_answer(documents: List[str]) -> str:
     if not documents:
         return "Sorry, I could not find information related to your question."
 
-    return (
-        "Based on the Zepto support information: "
-        + documents[0]
-    )
+    top_chunk_snippet = documents[0][:200]
+
+    return f"Based on the retrieved context: {top_chunk_snippet}"
 
 
 def retrieve_and_answer(state: AssistantState):
-    documents, sources, distances = retrieve_documents(
-        state["question"]
-    )
+    documents, sources = retrieve_documents(state["query"])
 
-    prompt = build_prompt(state["question"], documents)
+    prompt = build_prompt(state["query"], documents)
 
     if MOCK_LLM:
-        answer = mock_answer(state["question"], documents)
+        answer = mock_policy_answer(documents)
     else:
         answer = (
             "Real LLM mode is not configured yet. "
-            "Please use MOCK_LLM=1 or configure an LLM provider."
+            "The structured prompt is ready for LLM integration."
         )
-
-    confidence = 0.85 if documents else 0.20
 
     return {
         "answer": answer,
         "sources": sources,
-        "confidence": confidence,
+        "confidence": 1.0,
     }
 
 
 def direct_answer(state: AssistantState):
+    if MOCK_LLM:
+        answer = (
+            "I can only answer questions about Zepto policies right now."
+        )
+    else:
+        answer = (
+            "Real LLM mode is not configured yet for general questions."
+        )
+
     return {
-        "answer": (
-            "Please contact Zepto support through in-app chat "
-            "for assistance with this question."
-        ),
+        "answer": answer,
         "sources": [],
-        "confidence": 0.40,
+        "confidence": 1.0,
     }
 
 
 def route_intent(state: AssistantState):
-    if state.get("intent") == "general":
-        return "direct_answer"
+    if state["intent"] == "policy_question":
+        return "retrieve_and_answer"
 
-    return "retrieve_and_answer"
+    return "direct_answer"
 
 
 graph_builder = StateGraph(AssistantState)
@@ -203,11 +205,11 @@ def root():
 @app.post("/ask", response_model=AskResponse)
 def ask_question(request: AskRequest):
     result = assistant_graph.invoke(
-        {"question": request.question}
+        {"query": request.query}
     )
 
     return AskResponse(
         answer=result["answer"],
         sources=result.get("sources", []),
-        confidence=result.get("confidence", 0.0),
+        confidence=result.get("confidence", 1.0),
     )

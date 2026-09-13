@@ -31,7 +31,7 @@ if st.button("Ask Assistant", type="primary"):
             with st.spinner("Finding the best answer..."):
                 response = requests.post(
                     API_URL,
-                    json={"question": question},
+                    json={"query": question},
                     timeout=30,
                 )
 
