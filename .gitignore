@@ -1,3 +1,7 @@
 .venv/
 data_pipeline/books.csv
+data_pipeline/books.db
 .ipynb_checkpoints/
+__pycache__/
+*.py[cod]
+support_assistant/chroma_db/
