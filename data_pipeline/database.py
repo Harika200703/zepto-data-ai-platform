@@ -1,7 +1,7 @@
 import sqlite3
+import csv
 
 connection = sqlite3.connect("data_pipeline/books.db")
-
 cursor = connection.cursor()
 
 cursor.execute("""
@@ -22,7 +22,20 @@ CREATE TABLE IF NOT EXISTS books (
 )
 """)
 
+with open("data_pipeline/books.csv", "r", encoding="utf-8") as file:
+    reader = csv.DictReader(file)
+
+    for book in reader:
+        cursor.execute("""
+        INSERT INTO books (title, price_gbp, price_inr)
+        VALUES (?, ?, ?)
+        """, (
+            book["title"],
+            book["price_gbp"],
+            book["price_inr"]
+        ))
+
 connection.commit()
 connection.close()
 
-print("Database tables created successfully")
+print("Books inserted successfully")
